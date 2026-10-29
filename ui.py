@@ -3351,90 +3351,66 @@ class RemoteKeyOverlay(QWidget):
 
 
 
-class DraggableSplitterHandle(QSplitterHandle):
-    """Custom splitter handle with horizontal resize arrow cursor and grip dots."""
-    def __init__(self, orientation, parent):
-        super().__init__(orientation, parent)
-        self.setCursor(Qt.CursorShape.SizeHorCursor)
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        cx = self.width() / 2.0
-        cy = self.height() / 2.0
-        p.setPen(Qt.PenStyle.NoPen)
-        color = QColor(C.PRI) if self.underMouse() else QColor("#444444")
-        p.setBrush(QBrush(color))
-        # Draw 3 vertical grip dots
-        for dy in (-10, 0, 10):
-            p.drawEllipse(QPointF(cx, cy + dy), 1.6, 1.6)
-        p.end()
-
-
-class DraggableSplitter(QSplitter):
-    """Horizontal draggable splitter used to set the width of each widget."""
-    def __init__(self, orientation=Qt.Orientation.Horizontal, parent=None):
-        super().__init__(orientation, parent)
-        self.setHandleWidth(10)
-        self.setChildrenCollapsible(False)
-        self.setStyleSheet(f"""
-            QSplitter::handle:horizontal {{
-                background: #0d0d0d;
-                border-left: 1px solid #1c1c1c;
-                border-right: 1px solid #1c1c1c;
-            }}
-            QSplitter::handle:horizontal:hover {{
-                background: #142230;
-                border-left: 1px solid {C.PRI};
-                border-right: 1px solid {C.PRI};
-            }}
-        """)
-
-    def createHandle(self):
-        return DraggableSplitterHandle(self.orientation(), self)
-
-
-class PersistentVoiceBar(QWidget):
+class FloatingVoiceCard(QWidget):
     """
-    Compact, draggable voice interaction bar that always appears across all pages.
-    Includes live voice state indicator, mic interaction, audio level reactivity,
-    and a prominent STOP button to halt speech and actions immediately.
+    Compact, draggable floating HUD card that stays permanently visible on-screen,
+    on top of all applications and across all monitors, even when the main Echo window
+    is minimized, obscured, or on another workspace.
+    Contains:
+    - Real-time voice state & animated equalizer
+    - Mic mute toggle button
+    - Immediate STOP button to halt speech & tasks
+    - REVERT button to undo last action / file change
+    - Main window restore / focus toggle
     """
     def __init__(self, main_win, parent=None):
-        super().__init__(parent or main_win.centralWidget())
+        super().__init__(
+            None,
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool,
+        )
         self._main_win = main_win
         self._drag_pos = None
-        self._custom_pos = None
         self._is_speaking = False
         self._is_muted = False
         self._state_str = "IDLE"
 
-        self.setFixedHeight(38)
-        self.setMinimumWidth(280)
-        self.setMaximumWidth(340)
-        self.setCursor(Qt.CursorShape.SizeAllCursor)
-        self.setObjectName("PersistentVoiceBar")
-        self.setStyleSheet(f"""
-            QWidget#PersistentVoiceBar {{
-                background: #0b1118;
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setFixedHeight(42)
+        self.setMinimumWidth(380)
+        self.setObjectName("FloatingVoiceCard")
+
+        # Outer layout
+        root_lay = QHBoxLayout(self)
+        root_lay.setContentsMargins(4, 2, 4, 2)
+        root_lay.setSpacing(0)
+
+        # Card container with dark cyber styling & rounded border
+        card = QFrame()
+        card.setObjectName("FloatingCardFrame")
+        card.setStyleSheet(f"""
+            QFrame#FloatingCardFrame {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(8, 14, 24, 0.96), stop:1 rgba(11, 19, 32, 0.96));
                 border: 1px solid {C.PRI_DIM};
                 border-radius: 19px;
             }}
-            QWidget#PersistentVoiceBar:hover {{
+            QFrame#FloatingCardFrame:hover {{
                 border-color: {C.PRI};
             }}
         """)
-
-        lay = QHBoxLayout(self)
+        lay = QHBoxLayout(card)
         lay.setContentsMargins(10, 2, 8, 2)
-        lay.setSpacing(7)
+        lay.setSpacing(6)
 
-        # Drag grip icon
+        # Drag grip
         self._grip = QLabel("⋮⋮")
         self._grip.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
         self._grip.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
-        self._grip.setToolTip("Drag to reposition voice bar anywhere on screen")
+        self._grip.setCursor(Qt.CursorShape.SizeAllCursor)
+        self._grip.setToolTip("Drag to move this floating card anywhere on any screen")
         lay.addWidget(self._grip)
 
         # Voice status icon & label
@@ -3462,13 +3438,13 @@ class PersistentVoiceBar(QWidget):
             self._bars.append(b)
         lay.addLayout(bar_box)
 
-        lay.addStretch(1)
+        lay.addSpacing(4)
 
         # Mic toggle button
         self._mic_btn = QPushButton("🎙")
         self._mic_btn.setFixedSize(26, 26)
         self._mic_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._mic_btn.setToolTip("Click to toggle microphone active / muted")
+        self._mic_btn.setToolTip("Microphone: Click to toggle mute (Space / M)")
         self._mic_btn.setStyleSheet(f"""
             QPushButton {{
                 background: #142028;
@@ -3486,19 +3462,19 @@ class PersistentVoiceBar(QWidget):
         self._mic_btn.clicked.connect(self._toggle_mic)
         lay.addWidget(self._mic_btn)
 
-        # Stop point button
+        # Stop button
         self._stop_btn = QPushButton("⏹ STOP")
-        self._stop_btn.setFixedHeight(26)
+        self._stop_btn.setFixedHeight(24)
         self._stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._stop_btn.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
-        self._stop_btn.setToolTip("Immediate stop point: halt speech and action now (Esc)")
+        self._stop_btn.setToolTip("Immediate stop: halt speech and running actions immediately (Esc)")
         self._stop_btn.setStyleSheet("""
             QPushButton {
                 background: #330808;
                 color: #ff5555;
                 border: 1px solid #771818;
-                border-radius: 13px;
-                padding: 0 9px;
+                border-radius: 12px;
+                padding: 0 8px;
                 letter-spacing: 0.5px;
             }
             QPushButton:hover {
@@ -3513,10 +3489,75 @@ class PersistentVoiceBar(QWidget):
         self._stop_btn.clicked.connect(self._on_stop)
         lay.addWidget(self._stop_btn)
 
+        # Revert button
+        self._revert_btn = QPushButton("↺ REVERT")
+        self._revert_btn.setFixedHeight(24)
+        self._revert_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._revert_btn.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        self._revert_btn.setToolTip("Revert / Undo last action or file change (Ctrl+Z)")
+        self._revert_btn.setStyleSheet("""
+            QPushButton {
+                background: #251c08;
+                color: #f0c050;
+                border: 1px solid #553e12;
+                border-radius: 12px;
+                padding: 0 8px;
+                letter-spacing: 0.5px;
+            }
+            QPushButton:hover {
+                background: #382b0e;
+                color: #ffffff;
+                border-color: #ffd060;
+            }
+            QPushButton:pressed {
+                background: #4a3912;
+            }
+        """)
+        self._revert_btn.clicked.connect(self._on_revert)
+        lay.addWidget(self._revert_btn)
+
+        # App / Window Restore button
+        self._app_btn = QPushButton("⛶ ECHO")
+        self._app_btn.setFixedHeight(24)
+        self._app_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._app_btn.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        self._app_btn.setToolTip("Restore / Bring Echo full window to front")
+        self._app_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                color: {C.TEXT_MED};
+                border: 1px solid {C.BORDER};
+                border-radius: 12px;
+                padding: 0 7px;
+            }}
+            QPushButton:hover {{
+                background: {C.PANEL2};
+                color: {C.PRI};
+                border-color: {C.PRI_DIM};
+            }}
+        """)
+        self._app_btn.clicked.connect(self._toggle_app_window)
+        lay.addWidget(self._app_btn)
+
+        root_lay.addWidget(card)
+
+        # Position initially at top right of primary screen
+        self._init_position()
+
         # Audio level animation timer
         self._audio_tmr = QTimer(self)
         self._audio_tmr.timeout.connect(self._update_audio_anim)
         self._audio_tmr.start(40)
+
+    def _init_position(self):
+        try:
+            screen = QApplication.primaryScreen().availableGeometry()
+            w = 380
+            x = screen.x() + screen.width() - w - 24
+            y = screen.y() + 32
+            self.move(x, y)
+        except Exception:
+            pass
 
     def _toggle_mic(self):
         if hasattr(self._main_win, "_toggle_mute"):
@@ -3527,6 +3568,32 @@ class PersistentVoiceBar(QWidget):
         QTimer.singleShot(1000, lambda: self._stop_btn.setText("⏹ STOP"))
         if hasattr(self._main_win, "_do_interrupt"):
             self._main_win._do_interrupt()
+
+    def _on_revert(self):
+        try:
+            import core.undo as undo_mod
+            res = undo_mod.undo_last()
+            if "Undone:" in res:
+                self._revert_btn.setText("✓ REVERTED")
+                QTimer.singleShot(1200, lambda: self._revert_btn.setText("↺ REVERT"))
+            else:
+                self._revert_btn.setText("✕ NO ACTION")
+                QTimer.singleShot(1200, lambda: self._revert_btn.setText("↺ REVERT"))
+            if hasattr(self._main_win, "_log"):
+                self._main_win._log.append_log(f"SYS: {res}")
+        except Exception as e:
+            if hasattr(self._main_win, "_log"):
+                self._main_win._log.append_log(f"ERR: Revert failed: {e}")
+
+    def _toggle_app_window(self):
+        win = self._main_win
+        if win.isMinimized() or not win.isVisible():
+            win.showNormal()
+            win.raise_()
+            win.activateWindow()
+        else:
+            win.raise_()
+            win.activateWindow()
 
     def set_state(self, state: str):
         self._state_str = (state or "IDLE").upper()
@@ -3552,6 +3619,18 @@ class PersistentVoiceBar(QWidget):
                 QPushButton {{
                     background: #201a08; color: {C.ACC};
                     border: 1px solid {C.ACC}; border-radius: 13px;
+                }}
+            """)
+        elif self._state_str == "THINKING":
+            self._dot.setText("●")
+            self._dot.setStyleSheet(f"color: {C.PURPLE}; background: transparent;")
+            self._state_lbl.setText("THINKING")
+            self._state_lbl.setStyleSheet(f"color: {C.PURPLE}; background: transparent;")
+            self._mic_btn.setText("🎙")
+            self._mic_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: #181028; color: {C.PURPLE};
+                    border: 1px solid {C.PURPLE}; border-radius: 13px;
                 }}
             """)
         elif self._state_str == "LISTENING":
@@ -3586,10 +3665,11 @@ class PersistentVoiceBar(QWidget):
 
     def _update_audio_anim(self):
         try:
-            amp = getattr(self._main_win.hud, "_amp_disp", 0.0)
+            amp = getattr(self._main_win.hud, "_live_amp", 0.0)
             speaking = getattr(self._main_win.hud, "speaking", False)
             h_base = 5
             if speaking or amp > 0.04:
+                import random
                 h1 = int(min(20, max(5, h_base + amp * 24 + random.uniform(-1, 2))))
                 h2 = int(min(20, max(5, h_base + amp * 32 + random.uniform(-2, 2))))
                 h3 = int(min(20, max(5, h_base + amp * 20 + random.uniform(-1, 1))))
@@ -3608,33 +3688,14 @@ class PersistentVoiceBar(QWidget):
 
     def mouseMoveEvent(self, event):
         if self._drag_pos is not None and event.buttons() == Qt.MouseButton.LeftButton:
-            new_pos = event.globalPosition().toPoint() - self._drag_pos
-            parent = self.parentWidget()
-            if parent:
-                max_x = max(0, parent.width() - self.width())
-                max_y = max(0, parent.height() - self.height())
-                nx = max(0, min(new_pos.x(), max_x))
-                ny = max(0, min(new_pos.y(), max_y))
-                self.move(nx, ny)
-                self._custom_pos = (nx, ny)
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
             event.accept()
 
     def mouseReleaseEvent(self, event):
         self._drag_pos = None
 
-    def update_position(self, parent_w: int, parent_h: int):
-        """Called on resize to keep widget positioned or clamped within bounds."""
-        if self._custom_pos is not None:
-            cx, cy = self._custom_pos
-            max_x = max(0, parent_w - self.width())
-            max_y = max(0, parent_h - self.height())
-            self.move(max(0, min(cx, max_x)), max(0, min(cy, max_y)))
-        else:
-            # Default placement: Top-center-right
-            x = max(10, parent_w - self.width() - 24)
-            y = 12
-            self.move(x, y)
-        self.raise_()
+
+PersistentVoiceBar = FloatingVoiceCard
 
 
 class MainWindow(QMainWindow):
@@ -3720,9 +3781,12 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        self._splitter = DraggableSplitter(Qt.Orientation.Horizontal)
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+
         self._left_panel = self._build_left_panel()
-        self._splitter.addWidget(self._left_panel)
+        body.addWidget(self._left_panel, stretch=0)
 
         self.hud = HudCanvas(face_path, _display)
         self.hud.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -3897,23 +3961,18 @@ class MainWindow(QMainWindow):
         cc_lay.addWidget(echo_card, stretch=0)
         cc_lay.addStretch(1)
 
-        self._splitter.addWidget(center_col)
+        body.addWidget(center_col, stretch=1)
 
         self._right_panel = self._build_right_panel()
-        self._splitter.addWidget(self._right_panel)
+        body.addWidget(self._right_panel, stretch=0)
 
-        self._splitter.setStretchFactor(0, 0)
-        self._splitter.setStretchFactor(1, 1)
-        self._splitter.setStretchFactor(2, 0)
-        self._splitter.setSizes([_LEFT_W, 620, _RIGHT_W])
-
-        root.addWidget(self._splitter, stretch=1)
+        root.addLayout(body, stretch=1)
         root.addWidget(self._build_footer())
 
-        # Persistent voice interaction bar with stop point (always visible on all pages)
-        self._mini_voice = PersistentVoiceBar(self)
-        self._mini_voice.show()
-        self._mini_voice.raise_()
+        # Floating voice card (always visible on-screen across each screen/app)
+        self._floating_card = FloatingVoiceCard(self)
+        self._floating_card.show()
+        self._mini_voice = self._floating_card
 
         # Quick-access drawer (floating overlay, built after central widget layout is done)
         self._quick_drawer = self._build_quick_drawer()
@@ -4560,6 +4619,11 @@ class MainWindow(QMainWindow):
             if Path(path).is_file():
                 self._on_file_selected(path)
 
+    def closeEvent(self, event):
+        if hasattr(self, "_floating_card") and self._floating_card:
+            self._floating_card.close()
+        super().closeEvent(event)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         cw = self.centralWidget()
@@ -4594,17 +4658,11 @@ class MainWindow(QMainWindow):
         if cam_preview:
             pw = _CameraPreview._W
             ph = cam_preview.height() or _CameraPreview._H
-            rw = self._right_panel.width() if hasattr(self, "_right_panel") else _RIGHT_W
             cam_preview.setGeometry(
-                cw.width() - rw - pw - 12,
+                cw.width() - _RIGHT_W - pw - 12,
                 cw.height() - ph - 28,
                 pw, ph,
             )
-        # Persistent voice bar — always kept on top across all pages
-        mini_voice = getattr(self, "_mini_voice", None)
-        if mini_voice and mini_voice.isVisible():
-            mini_voice.update_position(cw.width(), cw.height())
-            mini_voice.raise_()
         # Clipboard panel — bottom-center
         if hasattr(self, '_clipboard_panel') and self._clipboard_panel.isVisible():
             self._position_clipboard_panel()
@@ -4754,9 +4812,7 @@ class MainWindow(QMainWindow):
 
     def _build_left_panel(self) -> QWidget:
         w = QWidget()
-        w.setMinimumWidth(180)
-        w.setMaximumWidth(480)
-        w.resize(_LEFT_W, 600)
+        w.setFixedWidth(_LEFT_W)
         w.setStyleSheet(f"background: transparent;")
         outer = QVBoxLayout(w)
         outer.setContentsMargins(16, 16, 8, 16)
@@ -4996,9 +5052,7 @@ class MainWindow(QMainWindow):
         self._chat_history = self._log
 
         w = QWidget()
-        w.setMinimumWidth(220)
-        w.setMaximumWidth(750)
-        w.resize(_RIGHT_W, 600)
+        w.setFixedWidth(_RIGHT_W)
         w.setStyleSheet("background: transparent;")
         outer = QVBoxLayout(w)
         outer.setContentsMargins(8, 16, 16, 8)

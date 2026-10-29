@@ -691,6 +691,107 @@ class DashboardServer:
                 self._wake_callback()
             return JSONResponse({"ok": True})
 
+        # ── Secure Remote Task Management ────────────────────────────────────
+
+        @app.get("/api/tasks")
+        async def list_tasks_ep(req: Request):
+            """Return list of all task checkpoints with progress."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from core.task_engine import TaskEngine
+                engine = TaskEngine()
+                tasks = engine.list_checkpoints()
+                return JSONResponse({"ok": True, "tasks": tasks})
+            except Exception as e:
+                return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+        @app.get("/api/tasks/{task_id}")
+        async def get_task_ep(task_id: str, req: Request):
+            """Get detailed step timeline, status, and verification outputs."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                from core.task_engine import TaskEngine
+                engine = TaskEngine()
+                plan = engine.load_checkpoint(task_id)
+                if not plan:
+                    return JSONResponse({"ok": False, "error": "Task not found"}, status_code=404)
+                return JSONResponse({"ok": True, "task": plan.to_dict()})
+            except Exception as e:
+                return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+        @app.post("/api/tasks/{task_id}/action")
+        async def task_action_ep(task_id: str, req: Request):
+            """Remotely pause, resume, approve, or cancel a task."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+            except Exception:
+                body = {}
+            action = body.get("action", "").lower().strip()
+            try:
+                from core.task_engine import TaskEngine
+                engine = TaskEngine()
+                plan = engine.load_checkpoint(task_id)
+                if not plan:
+                    return JSONResponse({"ok": False, "error": "Task not found"}, status_code=404)
+
+                if action in ("cancel", "stop"):
+                    engine.cancel_task(task_id)
+                    asyncio.create_task(self.broadcast({"type": "task_update", "task_id": task_id, "status": "CANCELLED"}))
+                    return JSONResponse({"ok": True, "status": "CANCELLED"})
+
+                elif action in ("resume", "retry"):
+                    from actions.task_planner import _dispatch_action
+                    def _run_bg():
+                        engine.execute_plan(plan, executor_fn=lambda t, p: _dispatch_action(t, p))
+                    asyncio.get_event_loop().run_in_executor(None, _run_bg)
+                    asyncio.create_task(self.broadcast({"type": "task_update", "task_id": task_id, "status": "RUNNING"}))
+                    return JSONResponse({"ok": True, "status": "RUNNING"})
+
+                elif action in ("approve",):
+                    for s in plan.steps:
+                        if s.status == "WAITING_APPROVAL":
+                            s.status = "PENDING"
+                    engine.save_checkpoint(plan)
+                    return JSONResponse({"ok": True, "status": "APPROVED"})
+
+                return JSONResponse({"ok": False, "error": f"Unknown action: {action}"}, status_code=400)
+            except Exception as e:
+                return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+        @app.post("/api/tasks/create")
+        async def create_task_ep(req: Request):
+            """Start autonomous task remotely."""
+            if not _auth(req):
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+            try:
+                body = await req.json()
+            except Exception:
+                body = {}
+            goal = body.get("goal", "").strip()
+            steps = body.get("steps", [])
+            if not goal:
+                return JSONResponse({"ok": False, "error": "Goal required"}, status_code=400)
+            try:
+                from core.task_engine import TaskEngine
+                from actions.task_planner import _dispatch_action
+                engine = TaskEngine()
+                if not steps:
+                    steps = [{"id": "step_1", "description": f"Execute: {goal}", "tool": "file_controller", "parameters": {"action": "list", "path": "desktop"}}]
+                plan = engine.create_plan(goal=goal, steps=steps)
+
+                def _run_bg():
+                    engine.execute_plan(plan, executor_fn=lambda t, p: _dispatch_action(t, p))
+                asyncio.get_event_loop().run_in_executor(None, _run_bg)
+
+                asyncio.create_task(self.broadcast({"type": "task_update", "task_id": plan.task_id, "status": "RUNNING"}))
+                return JSONResponse({"ok": True, "task_id": plan.task_id})
+            except Exception as e:
+                return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
         # ── Phone mic real-time audio → Gemini Live ──────────────────────────
 
         @app.websocket("/ws/phone-audio")

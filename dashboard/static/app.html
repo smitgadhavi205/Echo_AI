@@ -4,7 +4,95 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Echo Dashboard</title>
-  <script src="/static/crypto.js"></script>
+  <script src="/static/crypto.js">
+    // ── Secure Remote Task Management ─────────────────────────────────────────
+    function toggleTasksModal() {
+      const modal = document.getElementById('tasks-modal');
+      const isHidden = modal.style.display === 'none';
+      modal.style.display = isHidden ? 'block' : 'none';
+      if (isHidden) loadTasks();
+    }
+
+    async function loadTasks() {
+      const container = document.getElementById('tasks-list');
+      try {
+        const res = await fetch('/api/tasks', {
+          headers: { 'Authorization': 'Bearer ' + _authToken }
+        });
+        const data = await res.json();
+        if (!data.ok || !data.tasks || data.tasks.length === 0) {
+          container.innerHTML = '<div style="color:#64748b;font-size:12px;text-align:center;padding:16px;">No active or recorded tasks.</div>';
+          return;
+        }
+        let html = '';
+        for (const t of data.tasks) {
+          const isDone = t.status === 'COMPLETED';
+          const isFail = t.status === 'FAILED';
+          const isRun  = t.status === 'RUNNING';
+          const badgeCol = isDone ? 'color:#22c55e;border-color:rgba(34,197,94,0.3);background:rgba(34,197,94,0.1)' :
+                           isFail ? 'color:#ef4444;border-color:rgba(239,68,68,0.3);background:rgba(239,68,68,0.1)' :
+                           isRun  ? 'color:#6366f1;border-color:rgba(99,102,241,0.3);background:rgba(99,102,241,0.1)' :
+                                    'color:#94a3b8;border-color:rgba(148,163,184,0.3);background:rgba(148,163,184,0.1)';
+
+          html += `
+            <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:12px;">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+                <span style="font-weight:600;font-size:13px;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:320px;">${esc(t.goal || t.task_id)}</span>
+                <span style="font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px;border:1px solid;${badgeCol}">${t.status}</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;color:#64748b;">
+                <span>Progress: <strong style="color:#dde3ed">${t.progress}</strong></span>
+                <div style="display:flex;gap:6px;">
+                  ${isRun ? `<button onclick="taskAction('${t.task_id}','cancel')" style="background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.3);color:#ef4444;font-size:10px;padding:3px 8px;border-radius:4px;cursor:pointer;">Cancel</button>` : ''}
+                  ${!isDone && !isRun ? `<button onclick="taskAction('${t.task_id}','resume')" style="background:rgba(99,102,241,0.15);border:1px solid rgba(99,102,241,0.3);color:#818cf8;font-size:10px;padding:3px 8px;border-radius:4px;cursor:pointer;">Resume</button>` : ''}
+                </div>
+              </div>
+            </div>`;
+        }
+        container.innerHTML = html;
+      } catch (e) {
+        container.innerHTML = '<div style="color:#ef4444;font-size:12px;text-align:center;padding:16px;">Error loading tasks.</div>';
+      }
+    }
+
+    async function taskAction(taskId, action) {
+      try {
+        await fetch(`/api/tasks/${taskId}/action`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _authToken },
+          body: JSON.stringify({ action })
+        });
+        toast('Action: ' + action);
+        setTimeout(loadTasks, 400);
+      } catch (e) {
+        toast('Action failed');
+      }
+    }
+
+    async function submitNewTask() {
+      const inp = document.getElementById('task-goal-inp');
+      const goal = inp.value.trim();
+      if (!goal) return;
+      inp.value = '';
+      try {
+        const res = await fetch('/api/tasks/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _authToken },
+          body: JSON.stringify({ goal })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          toast('Task started');
+          setTimeout(loadTasks, 500);
+        } else {
+          toast('Failed: ' + (data.error || 'error'));
+        }
+      } catch (e) {
+        toast('Error creating task');
+      }
+    }
+
+  </script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
@@ -136,9 +224,10 @@
 <body>
   <div id="toast"></div>
   <header>
-    <div class="logo"><em>J</em>ARVIS</div>
+    <div class="logo"><em>E</em>CHO</div>
     <div class="pill" id="pill"><span class="dot"></span><span id="st">Connecting</span></div>
     <div class="enc-badge" id="enc">AES-256</div>
+    <button class="pill" id="task-pill" onclick="toggleTasksModal()" style="cursor:pointer;border-color:rgba(99,102,241,0.3);color:var(--accent);">⚡ Tasks</button>
     <div class="spacer"></div>
     <div class="url">__IP__:__PORT__</div>
   </header>
@@ -220,6 +309,7 @@
       if (m.type === 'wake')          sys('Wake word detected — connecting…');
       if (m.type === 'sys')           sys(m.text);
       if (m.type === 'file_received') _onFileReceived(m);
+      if (m.type === 'task_update')   { loadTasks(); toast('Task ' + (m.status || 'updated')); }
     };
 
     function setStatus(s) {
@@ -555,5 +645,23 @@
       _micIdle();
     }
   </script>
+
+  <!-- ── REMOTE TASK COMPANION MODAL ── -->
+  <div id="tasks-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.8);z-index:99;padding:16px;overflow-y:auto;backdrop-filter:blur(4px);">
+    <div style="max-width:540px;margin:24px auto;background:#0c101c;border:1px solid rgba(99,102,241,0.3);border-radius:16px;padding:20px;box-shadow:0 12px 30px rgba(0,0,0,0.5);">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+        <h3 style="font-size:16px;font-weight:700;letter-spacing:1px;color:#fff;">⚡ Remote Task Companion</h3>
+        <button onclick="toggleTasksModal()" style="background:transparent;border:none;color:#94a3b8;font-size:18px;cursor:pointer;">✕</button>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:16px;">
+        <input id="task-goal-inp" placeholder="Start autonomous task remotely..." style="flex:1;padding:10px 13px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.12);border-radius:9px;color:#fff;font-size:13px;outline:none;">
+        <button onclick="submitNewTask()" class="btn" style="background:var(--accent);color:#fff;padding:10px 16px;border-radius:9px;font-weight:700;">START</button>
+      </div>
+      <div id="tasks-list" style="display:flex;flex-direction:column;gap:10px;">
+        <div style="color:#64748b;font-size:12px;text-align:center;padding:20px 0;">Loading tasks...</div>
+      </div>
+    </div>
+  </div>
+
 </body>
 </html>

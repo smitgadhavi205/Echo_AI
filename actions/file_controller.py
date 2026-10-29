@@ -660,7 +660,13 @@ def file_controller(
         player.write_log(f"[file] {action} {name or path}")
 
     try:
-        if action == "list":
+        if action in ("open", "open_file"):
+            from actions.open_file import open_file as _do_open_file
+            target_name = name if name else (path if path not in ("desktop", "downloads", "documents", "home") else "")
+            folder_hint = path if name and path in ("desktop", "downloads", "documents", "home") else ""
+            return _do_open_file(parameters={"name": target_name, "folder": folder_hint, "app": params.get("app", "")}, player=player)
+
+        elif action == "list":
             return list_files(path)
 
         elif action == "create_file":
@@ -730,7 +736,7 @@ TOOL = {
         "properties": {
             "action": {
                 "type": "STRING",
-                "description": "list | create_file | create_folder | delete | move | copy | rename | read | write | find | largest | disk_usage | organize_desktop | info"
+                "description": "open | list | create_file | create_folder | delete | move | copy | rename | read | write | find | largest | disk_usage | organize_desktop | info"
             },
             "path": {
                 "type": "STRING",

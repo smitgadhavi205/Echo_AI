@@ -581,6 +581,232 @@ def _build_project(
     return f"{msg}\n\nLast error:\n{last_output[:600]}"
 
 
+# ── Full Developer Agent Capabilities (Git, Tests, Verification) ─────────
+
+def _resolve_repo_dir(raw_dir: str = "") -> Path:
+    if raw_dir:
+        p = Path(raw_dir).expanduser().resolve()
+        if p.exists():
+            return p
+    return Path.cwd()
+
+
+def git_status(repo_dir: Path) -> str:
+    """Return formatted status of tracked/untracked git files."""
+    try:
+        res = subprocess.run(
+            ["git", "status", "--short"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
+        if res.returncode != 0:
+            return f"Git error: {res.stderr.strip() or 'Not a git repository.'}"
+        out = res.stdout.strip()
+        if not out:
+            return f"Git working tree is clean at {repo_dir.name}/."
+        return f"Git Status ({repo_dir.name}):\n{out}"
+    except Exception as e:
+        return f"Git status failed: {e}"
+
+
+def git_diff(repo_dir: Path, staged: bool = False, file_path: str = "") -> str:
+    """Review code diff before approving or committing changes."""
+    cmd = ["git", "diff"]
+    if staged:
+        cmd.append("--cached")
+    if file_path:
+        cmd.extend(["--", file_path])
+    try:
+        res = subprocess.run(
+            cmd,
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+        )
+        if res.returncode != 0:
+            return f"Git diff error: {res.stderr.strip()}"
+        diff_text = res.stdout.strip()
+        if not diff_text:
+            return "No git diff detected (no changes)."
+        lines = diff_text.splitlines()
+        if len(lines) > 200:
+            return "\n".join(lines[:200]) + f"\n... [truncated, {len(lines) - 200} more lines]"
+        return diff_text
+    except Exception as e:
+        return f"Git diff review failed: {e}"
+
+
+def git_create_branch(repo_dir: Path, branch_name: str) -> str:
+    """Create and switch to a safe feature/fix branch before making code changes."""
+    clean_branch = re.sub(r"[^a-zA-Z0-9_\-\/]", "_", branch_name).strip("_")
+    if not clean_branch:
+        clean_branch = f"echo-fix-{int(time.time())}"
+    try:
+        res = subprocess.run(
+            ["git", "checkout", "-b", clean_branch],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
+        if res.returncode != 0:
+            return f"Could not create branch '{clean_branch}': {res.stderr.strip()}"
+        return f"Created and checked out safe branch '{clean_branch}' in {repo_dir.name}/."
+    except Exception as e:
+        return f"Branch creation failed: {e}"
+
+
+def git_rollback(repo_dir: Path, file_path: str = "") -> str:
+    """Revert uncommitted modifications safely."""
+    cmd = ["git", "restore"]
+    if file_path:
+        cmd.extend(["--", file_path])
+    else:
+        cmd.append(".")
+    try:
+        res = subprocess.run(
+            cmd,
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
+        if res.returncode != 0:
+            # Fallback to checkout for older git versions
+            res = subprocess.run(["git", "checkout", "--", file_path or "."], cwd=repo_dir, capture_output=True, text=True, encoding="utf-8", errors="replace")
+            if res.returncode != 0:
+                return f"Rollback failed: {res.stderr.strip()}"
+        target_name = file_path or "all modified files"
+        return f"Successfully rolled back uncommitted changes to {target_name}."
+    except Exception as e:
+        return f"Git rollback error: {e}"
+
+
+def run_tests(project_dir: Path, test_cmd: str = "", timeout: int = 45) -> str:
+    """
+    Automated test execution and failure analysis.
+    Auto-detects pytest, unittest, npm test, cargo test.
+    """
+    cmd_list = []
+    if test_cmd:
+        cmd_list = test_cmd.split() if isinstance(test_cmd, str) else list(test_cmd)
+    else:
+        # Auto-detect test runner
+        if (project_dir / "pytest.ini").exists() or (project_dir / "tests").exists() or list(project_dir.glob("test_*.py")):
+            cmd_list = [sys.executable, "-m", "pytest", "-v"]
+        elif (project_dir / "package.json").exists():
+            cmd_list = ["npm", "test"]
+        elif (project_dir / "Cargo.toml").exists():
+            cmd_list = ["cargo", "test"]
+        else:
+            # Default python unittest scan
+            cmd_list = [sys.executable, "-m", "unittest", "discover", "-s", str(project_dir), "-p", "test_*.py"]
+
+    try:
+        proc = subprocess.run(
+            cmd_list,
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+        out = (proc.stdout + "\n" + proc.stderr).strip()
+        passed = (proc.returncode == 0)
+
+        # Analyze failures if any
+        summary_lines = []
+        for line in out.splitlines():
+            low = line.lower()
+            if any(k in low for k in ("passed", "failed", "error", "errors", "failure", "failures", "ok", "passed in")):
+                summary_lines.append(line.strip())
+
+        status_header = "PASSED" if passed else "FAILED"
+        result_msg = f"Test Suite {status_header} (exit code {proc.returncode}):\n"
+        if summary_lines:
+            result_msg += "\nSummary: " + "; ".join(summary_lines[-3:]) + "\n"
+
+        if not passed:
+            # Extract last 20 lines of failure traceback
+            lines = out.splitlines()
+            tail = "\n".join(lines[-25:] if len(lines) > 25 else lines)
+            result_msg += f"\nFailure Analysis:\n{tail}"
+        else:
+            result_msg += "\nAll tests verified successfully."
+
+        return result_msg
+    except subprocess.TimeoutExpired:
+        return f"Test suite execution timed out after {timeout} seconds."
+    except Exception as e:
+        return f"Could not run test suite: {e}"
+
+
+def verify_build(project_dir: Path) -> str:
+    """Compile and verify syntax integrity before reporting success."""
+    py_files = list(project_dir.rglob("*.py"))
+    if not py_files:
+        return f"No python files to verify in {project_dir}."
+
+    errors = []
+    for pf in py_files:
+        if any(ignored in str(pf) for ignored in (".venv", "node_modules", ".git")):
+            continue
+        try:
+            res = subprocess.run(
+                [sys.executable, "-m", "py_compile", str(pf)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if res.returncode != 0:
+                errors.append(f"{pf.name}: {res.stderr.strip() or 'SyntaxError'}")
+        except Exception as e:
+            errors.append(f"{pf.name}: {e}")
+
+    if errors:
+        return f"Build Verification FAILED ({len(errors)} errors):\n" + "\n".join(errors[:5])
+    return f"Build Verified: {len(py_files)} files compiled cleanly with 0 syntax errors."
+
+
+def run_terminal_command(command: str, cwd: Path, timeout: int = 30) -> str:
+    """Controlled terminal command execution with safety checks and timeout."""
+    blocked = ["rm -rf /", "del /s /q c:", "format c:", ":(){ :|:& };:"]
+    clean_cmd = command.strip()
+    if any(b in clean_cmd.lower() for b in blocked):
+        return f"Command blocked by safety sandbox: '{command}'"
+
+    try:
+        proc = subprocess.run(
+            clean_cmd,
+            cwd=cwd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+        out = (proc.stdout + "\n" + proc.stderr).strip()
+        status = "Success" if proc.returncode == 0 else f"Failed (exit {proc.returncode})"
+        return f"[{status}] {clean_cmd}\n{out[:800]}"
+    except subprocess.TimeoutExpired:
+        return f"Command timed out after {timeout}s: '{clean_cmd}'"
+    except Exception as e:
+        return f"Command execution failed: {e}"
+
+
 def dev_agent(
     parameters: dict,
     response=None,
@@ -589,13 +815,57 @@ def dev_agent(
     speak=None,
 ) -> str:
     p            = parameters or {}
+    action       = p.get("action", "").strip().lower()
     description  = p.get("description", "").strip()
     language     = p.get("language", "python").strip()
     project_name = p.get("project_name", "").strip()
+    path_hint    = p.get("path", "").strip()
     timeout      = int(p.get("timeout", 30))
+    command      = p.get("command", "").strip()
 
+    repo_dir = _resolve_repo_dir(path_hint)
+
+    # 1. Automated test execution & failure analysis
+    if action in ("test", "run_tests", "tests"):
+        if player: player.write_log(f"[dev_agent] Running test suite in {repo_dir.name}...")
+        return run_tests(repo_dir, test_cmd=command, timeout=timeout)
+
+    # 2. Git diff review
+    elif action in ("git_diff", "diff", "git_review", "review"):
+        if player: player.write_log(f"[dev_agent] Inspecting git diff in {repo_dir.name}...")
+        staged = p.get("staged", False)
+        return git_diff(repo_dir, staged=staged, file_path=command)
+
+    # 3. Git status
+    elif action in ("git_status", "status"):
+        return git_status(repo_dir)
+
+    # 4. Safe branch creation
+    elif action in ("create_branch", "branch", "safe_branch"):
+        branch_name = command or p.get("branch_name", "") or f"feature-{int(time.time())}"
+        if player: player.write_log(f"[dev_agent] Creating branch {branch_name}...")
+        return git_create_branch(repo_dir, branch_name)
+
+    # 5. Git rollback / restore
+    elif action in ("rollback", "git_rollback", "revert"):
+        if player: player.write_log(f"[dev_agent] Rolling back changes in {repo_dir.name}...")
+        return git_rollback(repo_dir, file_path=command)
+
+    # 6. Build / syntax verification
+    elif action in ("verify", "verify_build", "compile_check"):
+        if player: player.write_log(f"[dev_agent] Verifying build syntax in {repo_dir.name}...")
+        return verify_build(repo_dir)
+
+    # 7. Controlled terminal command
+    elif action in ("terminal", "run_command", "exec"):
+        if not command:
+            return "Please provide a command to execute."
+        if player: player.write_log(f"[dev_agent] Running terminal command: {command}")
+        return run_terminal_command(command, cwd=repo_dir, timeout=timeout)
+
+    # 8. Default: Build complete project from scratch
     if not description:
-        return "Please describe the project you want me to build, sir."
+        return "Please describe the project you want me to build, or specify an action (test, git_diff, create_branch, verify, terminal)."
 
     return _build_project(
         description  = description,
@@ -610,30 +880,43 @@ def dev_agent(
 # ── Tool declaration (auto-discovered by core/action_loader.py) ──────────────
 TOOL = {
     "name": "dev_agent",
-    "description": "Builds complete multi-file projects from scratch: plans, writes files, installs deps, opens VSCode, runs and fixes errors.",
+    "description": (
+        "Full autonomous software developer agent: builds multi-file projects, runs automated test suites "
+        "with failure analysis (pytest/npm/cargo), inspects git diffs, creates safe branches, rolls back changes, "
+        "executes controlled terminal commands, and verifies zero syntax errors."
+    ),
     "parameters": {
         "type": "OBJECT",
         "properties": {
+            "action": {
+                "type": "STRING",
+                "description": "Action: 'build_project' (default) | 'run_tests' | 'git_diff' | 'git_status' | 'create_branch' | 'rollback' | 'verify_build' | 'terminal'",
+            },
             "description": {
                 "type": "STRING",
-                "description": "What the project should do"
+                "description": "Description of the project or feature to build (for build_project).",
+            },
+            "command": {
+                "type": "STRING",
+                "description": "Specific test command, branch name, or terminal command to run.",
+            },
+            "path": {
+                "type": "STRING",
+                "description": "Optional repository or project directory path.",
             },
             "language": {
                 "type": "STRING",
-                "description": "Programming language (default: python)"
+                "description": "Programming language (default: python).",
             },
             "project_name": {
                 "type": "STRING",
-                "description": "Optional project folder name"
+                "description": "Optional project folder name.",
             },
             "timeout": {
                 "type": "INTEGER",
-                "description": "Run timeout in seconds (default: 30)"
-            }
+                "description": "Execution timeout in seconds (default: 30).",
+            },
         },
-        "required": [
-            "description"
-        ]
     },
     "handler": dev_agent,
 }
