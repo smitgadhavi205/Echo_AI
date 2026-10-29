@@ -24,7 +24,7 @@ import threading
 from pathlib import Path
 from typing import Callable
 
-# Pretrained openwakeword model that listens for wake word ("Hey Echo" / "Hey Jarvis").
+# Pretrained openwakeword model that listens for wake word ("Hey Echo").
 WAKE_MODEL = "hey_jarvis"
 # Score in [0,1]; above this counts as a detection. Tunable per environment.
 DEFAULT_THRESHOLD = 0.5

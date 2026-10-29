@@ -52,7 +52,7 @@ except Exception as _e:            # noqa: BLE001 - reported, never fatal
 
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter,
+    QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSplitter, QSplitterHandle,
     QGraphicsScene, QGraphicsView,
     QStackedWidget, QTextEdit, QVBoxLayout, QWidget, QProgressBar,
 )
@@ -83,8 +83,8 @@ def _read_full_config() -> dict:
 
 # Single source of truth for the release name — the window title, the header
 # badge and the readme must never disagree again.
-APP_VERSION  = "MARK LV"
-APP_PROTOCOL = APP_VERSION.split()[-1]
+APP_VERSION  = "Echo AI"
+APP_PROTOCOL = "1.0"
 
 _DEFAULT_W, _DEFAULT_H = 1440, 900
 _MIN_W,     _MIN_H     = 1100, 720
@@ -434,7 +434,7 @@ class HudCanvas(QWidget):
             from memory.config_manager import get_hud_style
             self.hud_style = get_hud_style()
         except Exception:
-            self.hud_style = "face"
+            self.hud_style = "core"
         self._core_phase = 0.0
 
         self._tick       = 0
@@ -1015,6 +1015,7 @@ class SideChatHistory(QWidget):
         self._messages: list[dict] = []
         self._current_filter: str = "chat"
         self._max_messages: int = 400
+        self._msg_counter: int = 0
 
         self.setStyleSheet("background: #000000;")
         lay = QVBoxLayout(self)
@@ -1271,7 +1272,8 @@ class SideChatHistory(QWidget):
     def copy_all(self):
         lines = []
         for m in self._messages:
-            lines.append(f"[{m['timestamp']}] {m['sender']}: {m['text']}")
+            mid = f"#{m.get('id', '')} " if m.get('id') else ""
+            lines.append(f"{mid}[{m['timestamp']}] {m['sender']}: {m['text']}")
         if lines:
             QApplication.clipboard().setText("\n".join(lines))
             self._copy_btn.setText("✓")
@@ -1318,9 +1320,12 @@ class SideChatHistory(QWidget):
             oldest = self._messages.pop(0)
             oldest["widget"].deleteLater()
 
+        self._msg_counter += 1
+        msg_id = self._msg_counter
         ts = datetime.now().strftime("%H:%M:%S")
-        card = self._create_card(cat, sender, body, ts)
+        card = self._create_card(cat, sender, body, ts, msg_id)
         self._messages.append({
+            "id": msg_id,
             "category": cat,
             "sender": sender,
             "text": body,
@@ -1342,7 +1347,7 @@ class SideChatHistory(QWidget):
         self._update_empty_state()
         self._scroll_to_bottom()
 
-    def _create_card(self, category: str, sender: str, text: str, ts: str) -> QWidget:
+    def _create_card(self, category: str, sender: str, text: str, ts: str, msg_id: int = 1) -> QWidget:
         card = QWidget()
         c_lay = QVBoxLayout(card)
         c_lay.setContentsMargins(10, 8, 10, 8)
@@ -1351,10 +1356,72 @@ class SideChatHistory(QWidget):
         hdr = QHBoxLayout()
         hdr.setSpacing(6)
 
+        # Unique number badge
+        num_badge = QLabel(f"#{msg_id}")
+        num_badge.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        num_badge.setStyleSheet("""
+            background: #181c24;
+            color: #61afef;
+            border: 1px solid #283344;
+            border-radius: 4px;
+            padding: 1px 5px;
+        """)
+
         pill = QLabel(sender)
         pill.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         time_lbl = QLabel(ts)
         time_lbl.setFont(QFont("Consolas", 8))
+
+        # Revert action button
+        revert_btn = QPushButton("↩ Revert")
+        revert_btn.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+        revert_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        revert_btn.setToolTip(f"Revert action for #{msg_id}")
+        revert_btn.setStyleSheet("""
+            QPushButton {
+                background: #1a1612;
+                color: #e5c07b;
+                border: 1px solid #4a3820;
+                border-radius: 4px;
+                padding: 1px 6px;
+            }
+            QPushButton:hover {
+                background: #2a2014;
+                color: #ffd787;
+                border-color: #e5c07b;
+            }
+            QPushButton:disabled {
+                background: #111111;
+                color: #555555;
+                border-color: #222222;
+            }
+        """)
+
+        def _on_revert():
+            try:
+                import core.undo as undo_mod
+                res = undo_mod.undo_last()
+                if "Undone:" in res:
+                    revert_btn.setText("✓ Reverted")
+                    revert_btn.setEnabled(False)
+                    revert_btn.setStyleSheet("""
+                        QPushButton {
+                            background: #0d2012;
+                            color: #98c379;
+                            border: 1px solid #234d28;
+                            border-radius: 4px;
+                            padding: 1px 6px;
+                        }
+                    """)
+                    self.append_log(f"SYS: #{msg_id} {res}")
+                else:
+                    revert_btn.setText("✕ No action")
+                    QTimer.singleShot(1500, lambda: revert_btn.setText("↩ Revert"))
+                    self.append_log(f"SYS: #{msg_id} - {res}")
+            except Exception as e:
+                self.append_log(f"ERR: Revert failed: {e}")
+
+        revert_btn.clicked.connect(_on_revert)
 
         if category == "user":
             card.setStyleSheet("""
@@ -1411,8 +1478,10 @@ class SideChatHistory(QWidget):
             time_lbl.setStyleSheet("color: #555555; background: transparent;")
             text_color = "#888888"
 
+        hdr.addWidget(num_badge)
         hdr.addWidget(pill)
         hdr.addStretch()
+        hdr.addWidget(revert_btn)
         hdr.addWidget(time_lbl)
         c_lay.addLayout(hdr)
 
@@ -3281,6 +3350,293 @@ class RemoteKeyOverlay(QWidget):
         self.closed.emit()
 
 
+
+class DraggableSplitterHandle(QSplitterHandle):
+    """Custom splitter handle with horizontal resize arrow cursor and grip dots."""
+    def __init__(self, orientation, parent):
+        super().__init__(orientation, parent)
+        self.setCursor(Qt.CursorShape.SizeHorCursor)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        cx = self.width() / 2.0
+        cy = self.height() / 2.0
+        p.setPen(Qt.PenStyle.NoPen)
+        color = QColor(C.PRI) if self.underMouse() else QColor("#444444")
+        p.setBrush(QBrush(color))
+        # Draw 3 vertical grip dots
+        for dy in (-10, 0, 10):
+            p.drawEllipse(QPointF(cx, cy + dy), 1.6, 1.6)
+        p.end()
+
+
+class DraggableSplitter(QSplitter):
+    """Horizontal draggable splitter used to set the width of each widget."""
+    def __init__(self, orientation=Qt.Orientation.Horizontal, parent=None):
+        super().__init__(orientation, parent)
+        self.setHandleWidth(10)
+        self.setChildrenCollapsible(False)
+        self.setStyleSheet(f"""
+            QSplitter::handle:horizontal {{
+                background: #0d0d0d;
+                border-left: 1px solid #1c1c1c;
+                border-right: 1px solid #1c1c1c;
+            }}
+            QSplitter::handle:horizontal:hover {{
+                background: #142230;
+                border-left: 1px solid {C.PRI};
+                border-right: 1px solid {C.PRI};
+            }}
+        """)
+
+    def createHandle(self):
+        return DraggableSplitterHandle(self.orientation(), self)
+
+
+class PersistentVoiceBar(QWidget):
+    """
+    Compact, draggable voice interaction bar that always appears across all pages.
+    Includes live voice state indicator, mic interaction, audio level reactivity,
+    and a prominent STOP button to halt speech and actions immediately.
+    """
+    def __init__(self, main_win, parent=None):
+        super().__init__(parent or main_win.centralWidget())
+        self._main_win = main_win
+        self._drag_pos = None
+        self._custom_pos = None
+        self._is_speaking = False
+        self._is_muted = False
+        self._state_str = "IDLE"
+
+        self.setFixedHeight(38)
+        self.setMinimumWidth(280)
+        self.setMaximumWidth(340)
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+        self.setObjectName("PersistentVoiceBar")
+        self.setStyleSheet(f"""
+            QWidget#PersistentVoiceBar {{
+                background: #0b1118;
+                border: 1px solid {C.PRI_DIM};
+                border-radius: 19px;
+            }}
+            QWidget#PersistentVoiceBar:hover {{
+                border-color: {C.PRI};
+            }}
+        """)
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(10, 2, 8, 2)
+        lay.setSpacing(7)
+
+        # Drag grip icon
+        self._grip = QLabel("⋮⋮")
+        self._grip.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        self._grip.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
+        self._grip.setToolTip("Drag to reposition voice bar anywhere on screen")
+        lay.addWidget(self._grip)
+
+        # Voice status icon & label
+        self._dot = QLabel("●")
+        self._dot.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        self._dot.setStyleSheet(f"color: {C.GREEN}; background: transparent;")
+        lay.addWidget(self._dot)
+
+        self._state_lbl = QLabel("LISTENING")
+        self._state_lbl.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        self._state_lbl.setStyleSheet(f"color: {C.WHITE}; background: transparent; letter-spacing: 0.5px;")
+        lay.addWidget(self._state_lbl)
+
+        # Mini equalizer bars (3 bars)
+        self._bars = []
+        bar_box = QHBoxLayout()
+        bar_box.setSpacing(2)
+        bar_box.setContentsMargins(0, 0, 0, 0)
+        for _ in range(3):
+            b = QFrame()
+            b.setFixedWidth(3)
+            b.setFixedHeight(6)
+            b.setStyleSheet(f"background: {C.PRI}; border-radius: 1px;")
+            bar_box.addWidget(b)
+            self._bars.append(b)
+        lay.addLayout(bar_box)
+
+        lay.addStretch(1)
+
+        # Mic toggle button
+        self._mic_btn = QPushButton("🎙")
+        self._mic_btn.setFixedSize(26, 26)
+        self._mic_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._mic_btn.setToolTip("Click to toggle microphone active / muted")
+        self._mic_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: #142028;
+                color: {C.PRI};
+                border: 1px solid {C.BORDER};
+                border-radius: 13px;
+                font-size: 9pt;
+            }}
+            QPushButton:hover {{
+                background: #1e3240;
+                border-color: {C.PRI};
+                color: #ffffff;
+            }}
+        """)
+        self._mic_btn.clicked.connect(self._toggle_mic)
+        lay.addWidget(self._mic_btn)
+
+        # Stop point button
+        self._stop_btn = QPushButton("⏹ STOP")
+        self._stop_btn.setFixedHeight(26)
+        self._stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._stop_btn.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        self._stop_btn.setToolTip("Immediate stop point: halt speech and action now (Esc)")
+        self._stop_btn.setStyleSheet("""
+            QPushButton {
+                background: #330808;
+                color: #ff5555;
+                border: 1px solid #771818;
+                border-radius: 13px;
+                padding: 0 9px;
+                letter-spacing: 0.5px;
+            }
+            QPushButton:hover {
+                background: #551010;
+                color: #ffffff;
+                border-color: #ff3333;
+            }
+            QPushButton:pressed {
+                background: #771515;
+            }
+        """)
+        self._stop_btn.clicked.connect(self._on_stop)
+        lay.addWidget(self._stop_btn)
+
+        # Audio level animation timer
+        self._audio_tmr = QTimer(self)
+        self._audio_tmr.timeout.connect(self._update_audio_anim)
+        self._audio_tmr.start(40)
+
+    def _toggle_mic(self):
+        if hasattr(self._main_win, "_toggle_mute"):
+            self._main_win._toggle_mute()
+
+    def _on_stop(self):
+        self._stop_btn.setText("✓ STOPPED")
+        QTimer.singleShot(1000, lambda: self._stop_btn.setText("⏹ STOP"))
+        if hasattr(self._main_win, "_do_interrupt"):
+            self._main_win._do_interrupt()
+
+    def set_state(self, state: str):
+        self._state_str = (state or "IDLE").upper()
+        if self._is_muted or self._state_str == "MUTED":
+            self._dot.setText("⊘")
+            self._dot.setStyleSheet(f"color: {C.MUTED_C}; background: transparent;")
+            self._state_lbl.setText("MUTED")
+            self._state_lbl.setStyleSheet(f"color: {C.MUTED_C}; background: transparent;")
+            self._mic_btn.setText("🔇")
+            self._mic_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: #20080c; color: {C.MUTED_C};
+                    border: 1px solid {C.MUTED_C}; border-radius: 13px;
+                }}
+            """)
+        elif self._state_str == "SPEAKING":
+            self._dot.setText("●")
+            self._dot.setStyleSheet(f"color: {C.ACC}; background: transparent;")
+            self._state_lbl.setText("SPEAKING")
+            self._state_lbl.setStyleSheet(f"color: {C.ACC}; background: transparent;")
+            self._mic_btn.setText("🎙")
+            self._mic_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: #201a08; color: {C.ACC};
+                    border: 1px solid {C.ACC}; border-radius: 13px;
+                }}
+            """)
+        elif self._state_str == "LISTENING":
+            self._dot.setText("●")
+            self._dot.setStyleSheet(f"color: {C.GREEN}; background: transparent;")
+            self._state_lbl.setText("LISTENING")
+            self._state_lbl.setStyleSheet(f"color: {C.GREEN}; background: transparent;")
+            self._mic_btn.setText("🎙")
+            self._mic_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: #082012; color: {C.GREEN};
+                    border: 1px solid {C.GREEN}; border-radius: 13px;
+                }}
+            """)
+        else:
+            self._dot.setText("○")
+            self._dot.setStyleSheet(f"color: {C.PRI_DIM}; background: transparent;")
+            self._state_lbl.setText(self._state_str)
+            self._state_lbl.setStyleSheet(f"color: {C.TEXT_MED}; background: transparent;")
+            self._mic_btn.setText("🎙")
+            self._mic_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: #142028; color: {C.PRI};
+                    border: 1px solid {C.BORDER}; border-radius: 13px;
+                }}
+            """)
+
+    def set_muted(self, muted: bool):
+        self._is_muted = bool(muted)
+        cur_st = self._main_win.hud.state if hasattr(self._main_win, "hud") else "LISTENING"
+        self.set_state("MUTED" if muted else cur_st)
+
+    def _update_audio_anim(self):
+        try:
+            amp = getattr(self._main_win.hud, "_amp_disp", 0.0)
+            speaking = getattr(self._main_win.hud, "speaking", False)
+            h_base = 5
+            if speaking or amp > 0.04:
+                h1 = int(min(20, max(5, h_base + amp * 24 + random.uniform(-1, 2))))
+                h2 = int(min(20, max(5, h_base + amp * 32 + random.uniform(-2, 2))))
+                h3 = int(min(20, max(5, h_base + amp * 20 + random.uniform(-1, 1))))
+            else:
+                h1, h2, h3 = 5, 5, 5
+            self._bars[0].setFixedHeight(h1)
+            self._bars[1].setFixedHeight(h2)
+            self._bars[2].setFixedHeight(h3)
+        except Exception:
+            pass
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._drag_pos is not None and event.buttons() == Qt.MouseButton.LeftButton:
+            new_pos = event.globalPosition().toPoint() - self._drag_pos
+            parent = self.parentWidget()
+            if parent:
+                max_x = max(0, parent.width() - self.width())
+                max_y = max(0, parent.height() - self.height())
+                nx = max(0, min(new_pos.x(), max_x))
+                ny = max(0, min(new_pos.y(), max_y))
+                self.move(nx, ny)
+                self._custom_pos = (nx, ny)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self._drag_pos = None
+
+    def update_position(self, parent_w: int, parent_h: int):
+        """Called on resize to keep widget positioned or clamped within bounds."""
+        if self._custom_pos is not None:
+            cx, cy = self._custom_pos
+            max_x = max(0, parent_w - self.width())
+            max_y = max(0, parent_h - self.height())
+            self.move(max(0, min(cx, max_x)), max(0, min(cy, max_y)))
+        else:
+            # Default placement: Top-center-right
+            x = max(10, parent_w - self.width() - 24)
+            y = 12
+            self.move(x, y)
+        self.raise_()
+
+
 class MainWindow(QMainWindow):
     _log_sig        = pyqtSignal(str)
     _state_sig      = pyqtSignal(str)
@@ -3364,12 +3720,9 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        body = QHBoxLayout()
-        body.setContentsMargins(0, 0, 0, 0)
-        body.setSpacing(0)
-
+        self._splitter = DraggableSplitter(Qt.Orientation.Horizontal)
         self._left_panel = self._build_left_panel()
-        body.addWidget(self._left_panel, stretch=0)
+        self._splitter.addWidget(self._left_panel)
 
         self.hud = HudCanvas(face_path, _display)
         self.hud.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -3544,13 +3897,23 @@ class MainWindow(QMainWindow):
         cc_lay.addWidget(echo_card, stretch=0)
         cc_lay.addStretch(1)
 
-        body.addWidget(center_col, stretch=1)
+        self._splitter.addWidget(center_col)
 
         self._right_panel = self._build_right_panel()
-        body.addWidget(self._right_panel, stretch=0)
+        self._splitter.addWidget(self._right_panel)
 
-        root.addLayout(body, stretch=1)
+        self._splitter.setStretchFactor(0, 0)
+        self._splitter.setStretchFactor(1, 1)
+        self._splitter.setStretchFactor(2, 0)
+        self._splitter.setSizes([_LEFT_W, 620, _RIGHT_W])
+
+        root.addWidget(self._splitter, stretch=1)
         root.addWidget(self._build_footer())
+
+        # Persistent voice interaction bar with stop point (always visible on all pages)
+        self._mini_voice = PersistentVoiceBar(self)
+        self._mini_voice.show()
+        self._mini_voice.raise_()
 
         # Quick-access drawer (floating overlay, built after central widget layout is done)
         self._quick_drawer = self._build_quick_drawer()
@@ -4231,11 +4594,17 @@ class MainWindow(QMainWindow):
         if cam_preview:
             pw = _CameraPreview._W
             ph = cam_preview.height() or _CameraPreview._H
+            rw = self._right_panel.width() if hasattr(self, "_right_panel") else _RIGHT_W
             cam_preview.setGeometry(
-                cw.width() - _RIGHT_W - pw - 12,
+                cw.width() - rw - pw - 12,
                 cw.height() - ph - 28,
                 pw, ph,
             )
+        # Persistent voice bar — always kept on top across all pages
+        mini_voice = getattr(self, "_mini_voice", None)
+        if mini_voice and mini_voice.isVisible():
+            mini_voice.update_position(cw.width(), cw.height())
+            mini_voice.raise_()
         # Clipboard panel — bottom-center
         if hasattr(self, '_clipboard_panel') and self._clipboard_panel.isVisible():
             self._position_clipboard_panel()
@@ -4385,7 +4754,9 @@ class MainWindow(QMainWindow):
 
     def _build_left_panel(self) -> QWidget:
         w = QWidget()
-        w.setFixedWidth(_LEFT_W)
+        w.setMinimumWidth(180)
+        w.setMaximumWidth(480)
+        w.resize(_LEFT_W, 600)
         w.setStyleSheet(f"background: transparent;")
         outer = QVBoxLayout(w)
         outer.setContentsMargins(16, 16, 8, 16)
@@ -4625,7 +4996,9 @@ class MainWindow(QMainWindow):
         self._chat_history = self._log
 
         w = QWidget()
-        w.setFixedWidth(_RIGHT_W)
+        w.setMinimumWidth(220)
+        w.setMaximumWidth(750)
+        w.resize(_RIGHT_W, 600)
         w.setStyleSheet("background: transparent;")
         outer = QVBoxLayout(w)
         outer.setContentsMargins(8, 16, 16, 8)
@@ -6138,6 +6511,10 @@ class MainWindow(QMainWindow):
     def _do_interrupt(self):
         if self.on_interrupt:
             self.on_interrupt()
+        self.hud.speaking = False
+        self._apply_state("LISTENING")
+        if hasattr(self, "_mini_voice") and self._mini_voice is not None:
+            self._mini_voice.set_state("LISTENING")
 
     def _toggle_mute(self):
         # A deliberate press settles the question: whatever the video did, or is
@@ -6151,6 +6528,8 @@ class MainWindow(QMainWindow):
             return
         self._muted = muted
         self.hud.muted = muted
+        if hasattr(self, "_mini_voice") and self._mini_voice is not None:
+            self._mini_voice.set_muted(muted)
         self._style_mute_btn()
         if hasattr(self, "_mic_toggle") and self._mic_toggle is not None:
             if self._mic_toggle.isChecked() == muted:
@@ -6194,6 +6573,8 @@ class MainWindow(QMainWindow):
     def _apply_state(self, state: str):
         self.hud.state    = state
         self.hud.speaking = (state == "SPEAKING")
+        if hasattr(self, "_mini_voice") and self._mini_voice is not None:
+            self._mini_voice.set_state(state)
         if hasattr(self, "_dbg_state_val") and self._dbg_state_val is not None:
             self._dbg_state_val.setText(state)
         if hasattr(self, "_dbg_cooldown_val") and self._dbg_cooldown_val is not None:
@@ -6559,4 +6940,3 @@ class EchoUI:
 
 
 # Backward compatibility alias
-JarvisUI = EchoUI

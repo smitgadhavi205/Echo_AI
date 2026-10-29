@@ -46,8 +46,12 @@ from typing import Callable
 MAX_DEPTH = 10
 
 
+_next_id: int = 1
+
+
 @dataclass
 class _Entry:
+    id:      int
     label:   str                    # human sentence, spoken back to the user
     undo:    Callable[[], str]      # returns a short result string
     at:      float = field(default_factory=time.monotonic)
@@ -57,7 +61,7 @@ _stack: list[_Entry] = []
 _lock = threading.Lock()
 
 
-def push_undo(label: str, undo_fn: Callable[[], str]) -> None:
+def push_undo(label: str, undo_fn: Callable[[], str]) -> int:
     """Record that `label` just happened and `undo_fn()` reverses it.
 
     Called from action handlers, which run in executor threads — hence the
@@ -67,13 +71,40 @@ def push_undo(label: str, undo_fn: Callable[[], str]) -> None:
         return
     try:
         with _lock:
-            _stack.append(_Entry(label=str(label)[:120], undo=undo_fn))
-            # Drop the oldest rather than refusing the newest: the recent past
-            # is what people ask to undo.
+            global _next_id
+            eid = _next_id
+            _next_id += 1
+            _stack.append(_Entry(id=eid, label=str(label)[:120], undo=undo_fn))
             while len(_stack) > MAX_DEPTH:
                 _stack.pop(0)
+            return eid
+            # Drop the oldest rather than refusing the newest
     except Exception as e:                                  # pragma: no cover
         print(f"[Undo] push failed: {e}")
+
+
+def get_last_entry_id() -> int | None:
+    with _lock:
+        return _stack[-1].id if _stack else None
+
+
+def undo_entry_by_id(entry_id: int) -> str:
+    """Find and execute an undo entry by its unique ID, or undo_last if not found."""
+    with _lock:
+        target_idx = None
+        for i, entry in enumerate(_stack):
+            if entry.id == entry_id:
+                target_idx = i
+                break
+        if target_idx is None:
+            return undo_last()
+        entry = _stack.pop(target_idx)
+
+    try:
+        detail = entry.undo() or ""
+    except Exception as e:
+        return f"Could not undo '{entry.label}': {e}"
+    return f"Undone: {entry.label}." + (f" {detail}" if detail else "")
 
 
 def can_undo() -> bool:

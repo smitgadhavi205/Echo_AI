@@ -48,7 +48,7 @@ import sounddevice as sd
 import numpy as np
 from google import genai
 from google.genai import types
-from ui import EchoUI, JarvisUI
+from ui import EchoUI
 from memory.memory_manager import (
     load_memory, update_memory, format_memory_for_prompt,
     save_session_summary, pop_last_session,
@@ -438,7 +438,7 @@ TOOL_DECLARATIONS = [
                     )
                 },
                 "key":   {"type": "STRING", "description": "Short snake_case key (e.g. name, favorite_food, sister_name)"},
-                "value": {"type": "STRING", "description": "Concise value in English (e.g. Fatih, pizza, older sister)"},
+                "value": {"type": "STRING", "description": "Concise value in English (e.g. Alex, pizza, older sister)"},
             },
             "required": ["category", "key", "value"]
         }
@@ -1258,7 +1258,7 @@ class EchoLive:
                 else:
                     result = "Specify action (add/remove/list) and a topic."
 
-            elif name in ("shutdown_echo", "shutdown_jarvis"):
+            elif name == "shutdown_echo":
                 self.ui.write_log("SYS: Shutdown requested.")
                 async def _do_shutdown():
                     await self._save_session_summary()
@@ -2345,7 +2345,7 @@ class EchoLive:
 
 
 # Backward compatibility alias
-JarvisLive = EchoLive
+
 
 
 def main():
